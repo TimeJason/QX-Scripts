@@ -35,6 +35,10 @@ if (typeof $request !== 'undefined' && $request.url.includes('/ReceiveGift')) {
 }
 
 function getAuthData() {
+    if ($request.method !== 'POST') {
+        $.log(`捕获到非 POST 的 ${$request.method} 请求，已自动跳过。`);
+        return; // 安静地退出，不执行任何操作
+    }
     if (!$request.body) return $.msg($.name, '获取失败', '未能读取到请求体 (Body)。');
     try {
         const headers = $request.headers;
