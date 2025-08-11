@@ -1,0 +1,189 @@
+{
+  "id": "timejason.xinyue.sub",
+  "name": "TimeJason 脚本订阅",
+  "description": "该订阅集成了 BoxJs 配置界面、Quantumult X 定时任务和重写规则，实现一键配置。",
+  "author": "@TimeJason",
+  "icon": "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png",
+  "repo": "https://github.com/TimeJason/QX-Scripts",
+  "apps": [
+    {
+      "id": "xinyue_manager",
+      "name": "心悦俱乐部账号管理",
+      "repo": "https://github.com/TimeJason/QX-Scripts/tree/main/Scripts/QX/xinyue",
+      "icons": 
+      [
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/xinyue.png",
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/xinyue.png"
+      ],
+      "script": "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/xinyue/xinyue_yuexiangka.js",
+      "keys": [
+        "xinyue_datas",
+        "xinyue_notify_success",
+        "xinyue_debug_log"
+      ],
+      "descs_html": [
+        "<h3 align=\"center\">心悦俱乐部悦享卡自动领取</h3>",
+        "<p align=\"center\">一个强大且易于使用的自动化脚本</p>",
+        "<br>",
+        "<h4 align=\"center\">首次使用请务必阅读<a href=\"https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/xinyue/xinyue_yuexiangka.js\">脚本内的注释说明</a></h4>",
+        "<h4 align=\"center\">所有配置修改后，请务必点击页面底部的“保存”按钮</h4>"
+      ],
+      "settings": [
+        {
+          "id": "xinyue_pro_readme",
+          "name": "⚙️ 功能设置",
+          "type": "readme",
+          "val": "您可以在此自定义脚本的通知行为和日志输出。"
+        },
+        {
+          "id": "xinyue_notify_success",
+          "name": "成功领取通知",
+          "val": true,
+          "type": "boolean",
+          "desc": "默认情况下，每天领取成功后都会发送通知。如果您只希望在失败时收到提醒，请关闭此开关。"
+        },
+        {
+          "id": "xinyue_debug_log",
+          "name": "调试日志",
+          "val": false,
+          "type": "boolean",
+          "desc": "开启后，将在脚本日志中打印完整的服务器原始响应数据。这对于排查未知错误非常有用，普通用户请保持关闭。"
+        },
+        {
+          "id": "xinyue_datas",
+          "name": "数据列表",
+          "val": "[]",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 10,
+          "desc": "这里是所有账号配置的完整JSON字符串，通常由脚本自动维护，不建议手动修改。"
+        }
+      ]
+    },
+    {
+      "id": "fugui_luntan",
+      "name": "富贵论坛账号管理",
+      "icons": 
+      [
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png",
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png"
+      ],
+      "repo": "https://github.com/TimeJason/QX-Scripts/tree/main/Scripts/QX/FuGuiLunTan",
+      "script": "https://github.com/TimeJason/QX-Scripts/tree/main/Scripts/QX/FuGuiLunTan/fugui_sign.js",
+      "keys": [
+        "fugui_datas",
+        "fugui_notify_success",
+        "fugui_debug_log"
+      ],
+      "descs_html": [
+        "<h3 align=\"center\">富贵论坛每日自动签到</h3>",
+        "<p align=\"center\">一个每日自动签到的自动化脚本</p>",
+        "<br>",
+        "<h4 align=\"center\">首次使用请在富贵论坛App内手动“签到”一次以获取数据</h4>",
+        "<h4 align=\"center\">所有配置修改后，请务必点击页面底部的“保存”按钮</h4>"
+      ],
+      "settings": [
+        {
+          "id": "fugui_readme",
+          "name": "⚙️ 功能设置",
+          "type": "readme",
+          "val": "您可以在此自定义脚本的通知行为和日志输出。"
+        },
+        {
+          "id": "fugui_notify_success",
+          "name": "成功签到通知",
+          "val": true,
+          "type": "boolean",
+          "desc": "默认情况下，每天签到成功后都会发送通知。如果您只希望在失败时收到提醒，请关闭此开关。"
+        },
+        {
+          "id": "fugui_debug_log",
+          "name": "调试日志",
+          "val": false,
+          "type": "boolean",
+          "desc": "开启后，将在脚本日志中打印完整的服务器原始响应数据。这对于排查未知错误非常有用，普通用户请保持关闭。"
+        },
+        {
+          "id": "fugui_datas",
+          "name": "数据列表",
+          "val": "[]",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 10,
+          "desc": "这里是所有账号配置的完整JSON字符串，通常由脚本自动维护，不建议手动修改。"
+        }
+      ]
+    },
+    {
+      "id": "fugui_luntan_hour",
+      "name": "富贵论坛(小时签)",
+      "icons": 
+      [
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png",
+          "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png"
+      ],
+      "repo": "https://github.com/TimeJason/QX-Scripts/tree/main/Scripts/QX/FuGuiLunTan",
+      "script": "https://github.com/TimeJason/QX-Scripts/tree/main/Scripts/QX/FuGuiLunTan/fugui_sign_hour.js",
+      "keys": 
+      [
+        "fugui_hour_datas", 
+        "fugui_hour_notify_success", 
+        "fugui_hour_debug_log"
+      ],
+      "descs_html": 
+      [
+        "<h3 align=\"center\">富贵论坛小时自动签到 (网页)</h3>", 
+        "<p align=\"center\">一个用于网页版小时签到的自动化脚本</p>", 
+        "<br>", "<h4 align=\"center\">首次使用请在<b>浏览器</b>中登录并手动“小时签到”一次以获取数据</h4>", 
+        "<h4 align=\"center\">所有配置修改后，请务必点击页面底部的“保存”按钮</h4>"
+      ],
+      "settings": 
+      [
+        {
+          "id": "fugui_hour_readme", 
+          "name": "⚙️ 功能设置", 
+          "type": "readme", 
+          "val": "您可以在此自定义脚本的通知行为和日志输出。"
+        }, 
+        {
+          "id": "fugui_hour_notify_success", 
+          "name": "成功签到通知", 
+          "val": false, 
+          "type": "boolean", 
+          "desc": "默认情况下，每次签到成功后都不会发送通知以避免骚扰。建议保持关闭，仅在失败时提醒。"
+        }, 
+        {
+          "id": "fugui_hour_debug_log", 
+          "name": "调试日志", 
+          "val": false, 
+          "type": "boolean", 
+          "desc": "开启后，将在脚本日志中打印完整的服务器原始响应数据。"
+        },
+        {
+          "id": "fugui_hour_datas",
+          "name": "数据列表",
+          "val": "[]",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 10,
+          "desc": "这里是所有账号配置的完整JSON字符串，通常由脚本自动维护，不建议手动修改。"
+          
+        }
+      ]
+    }
+  ],
+  "task": [
+    {
+      "config": "0 9 * * * https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/xinyue/xinyue_yuexiangka.js, tag=心悦俱乐部每日领取, img-url=https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/xinyue.png, enabled=true",
+      "addons": "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/xinyue/xinyue_yuexiangka.conf, tag=心悦俱乐部悦享卡（获取Cookie）"
+    },
+    {
+      "config": "5 0 * * * https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/FuGuiLunTan/fugui_sign.js, tag=富贵论坛每日签到, img-url=https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png, enabled=true",
+      "addons": "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/FuGuiLunTan/fugui_sign.conf, tag=富贵论坛（获取Cookie）"
+    },
+    {
+      "config": "0 * * * * https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/FuGuiLunTan/fugui_sign_hour.js, tag=富贵论坛小时签到, img-url=https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/icon/Time.png, enabled=true",
+      "addons": "https://raw.githubusercontent.com/TimeJason/QX-Scripts/main/Scripts/QX/FuGuiLunTan/fugui_sign_hour.conf, tag=富贵论坛-小时(获取Cookie)"
+    }
+  ]
+}
