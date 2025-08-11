@@ -183,10 +183,15 @@ function claimReward(accountData) {
                 // 根据返回的 XML/HTML 片段判断结果
                 if (data.includes('您已签到完毕')) {
                     resultSummary += `🔁 重复签到。下个整点再来！`;
-                } else if (data.includes('签到成功') || data.includes('恭喜你')) {
-                    // 尝试从文本中提取奖励信息
-                    const match = data.match(/获得.*?奖励(.*?)\s*</);
-                    const reward = match ? match[1].trim() : '奖励';
+                } else if (data.includes('感谢您积极打卡') || data.includes('签到成功') || data.includes('恭喜你')) {
+                    // 匹配"特奖励：贡献 9"这类格式，提取具体奖励内容
+                    const match = data.match(/特奖励：(.*?)(\(|\s|$)/);
+                    // 若未匹配到，尝试通用的"奖励"关键词提取
+                    const fallbackMatch = !match && data.match(/奖励(：|：\s*)(.*?)(\(|\s|$)/);
+                    // 优先使用特奖励的匹配结果，否则用 fallback，都没有则显示默认
+                    const reward = match 
+                        ? match[1].trim() 
+                        : (fallbackMatch ? fallbackMatch[2].trim() : '奖励');
                     resultSummary += `✅ 签到成功 - 获得 ${reward}`;
                 } else if (data.includes('需要登录')) {
                     resultSummary += '❌ 签到失败 - Cookie 已失效，请重新抓取。';
