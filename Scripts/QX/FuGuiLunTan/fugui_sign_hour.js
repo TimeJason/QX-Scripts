@@ -135,6 +135,8 @@ async function runTasks() {
     const finalTitle = `富贵论坛小时签 (${currentHour}:00)`;
     const finalMessage = summary.join('\n');
     const notifySuccess = $.getdata(KEY_NOTIFY_SUCCESS) !== 'false';
+    
+    $.log(`\n--- 任务执行摘要 ---\n${finalMessage}\n--------------------`);
 
     if (allSuccessOrRepeat && !notifySuccess) {
         $.log('✅ 所有任务执行成功或重复，根据设置不发送通知。');
