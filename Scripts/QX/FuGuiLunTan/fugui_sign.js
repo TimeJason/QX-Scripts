@@ -111,6 +111,8 @@ async function runTasks() {
     const finalMessage = summary.join('\n');
     const notifySuccess = $.getdata(KEY_NOTIFY_SUCCESS) !== 'false';
 
+    $.log(`\n--- 任务执行摘要 ---\n${finalMessage}\n--------------------`);
+
     if (allSuccessOrRepeat && !notifySuccess) {
         $.log('✅ 所有任务执行成功或重复，根据设置不发送通知。');
     } else {
