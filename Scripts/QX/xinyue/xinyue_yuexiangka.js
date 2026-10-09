@@ -1,5 +1,5 @@
 /*
- * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.4 (免点击版)
+ * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.5 (免点击版)
  *
  * 作者: TimeJason
  * 更新日期: 2026-10-09
@@ -17,9 +17,8 @@
  *   注: 卡片的"购买页"接口 GetCardBuyStatus 不挂钩子 —— 它 98/198 都发且
  *       record_id 恒为空, 抓到的参数缺字段领不了奖, 只会产生噪音。
  *
- * 相比 v9.3:
- *   - 去掉 GetCardBuyStatus 钩子(缺 record_id, 无意义)
- *   - 昵称原样保留(有人昵称就是全角空格等不可见字符), 仅通知显示时退回角色名
+ * 相比 v9.4:
+ *   - 日志排版: 先用中文逐条列出各项结果并统计, 再发通知; 原始响应统一挪到"结束"之后
  */
 
 const $ = new Env('心悦俱乐部');
@@ -53,6 +52,9 @@ const SOURCE_LABEL = {
     getcard: '免点击抓取 (GetCardInfo)'
 };
 
+// 调试模式下收集各账号的原始响应, 统一放到日志最后输出, 不插在结果中间
+const rawResponses = [];
+
 if (typeof $request !== 'undefined') {
     if (typeof $response !== 'undefined') {
         // 响应体模式 (script-response-body): 「我的卡」列表。无论抓取是否成功都要原样放行,
@@ -77,7 +79,20 @@ if (typeof $request !== 'undefined') {
     (async () => {
         $.log('进入定时任务模式...');
         await runTasks();
-    })().catch((e) => $.logErr(e)).finally(() => $.done());
+    })().catch((e) => $.logErr(e)).finally(() => finishCron());
+}
+
+// 定时任务收尾: 先出"结束", 再统一输出原始响应, 避免大段 JSON 夹在结果中间
+function finishCron() {
+    const sec = ((Date.now() - $.startTime) / 1000).toFixed(3);
+    $.log('', `🔔${$.name}, 结束! 🕛 ${sec} 秒`);
+    if (rawResponses.length) {
+        $.log();
+        $.log('──────────── 原始响应 (调试) ────────────');
+        rawResponses.forEach((line) => $.log('  ' + line));
+    }
+    $.log();
+    $done({});
 }
 
 /* ============================ 抓取 ============================ */
@@ -275,6 +290,17 @@ async function runTasks() {
         if (i < accounts.length - 1) await $.wait(2000);
     }
 
+    // 日志里先用中文逐条列出结果, 再发系统通知
+    const ok = summary.filter((l) => l.includes('✅')).length;
+    const rep = summary.filter((l) => l.includes('🔁')).length;
+    const warn = summary.filter((l) => l.includes('⚠️')).length;
+    const fail = summary.filter((l) => l.includes('❌')).length;
+    $.log();
+    $.log('──────────── 执行结果 ────────────');
+    summary.forEach((line, i) => $.log(`  ${i + 1}. ${line.replace(/^👤\s*/, '')}`));
+    $.log(`  共 ${summary.length} 个账号 · 成功 ${ok} · 重复 ${rep}`
+        + (warn ? ` · 待处理 ${warn}` : '') + (fail ? ` · 失败 ${fail}` : ''));
+
     const notifySuccess = $.getdata(KEY_NOTIFY_SUCCESS) !== 'false';
     const title = `心悦悦享卡 (${$.time('MM-dd')})`;
     if (allOk && !notifySuccess) {
@@ -303,7 +329,7 @@ function claimReward(acc) {
 
         $.log(`\n▶️ [${name}] 开始领取...`);
         $.post({ url: CLAIM_URL, method: 'POST', headers: dynamicHeaders, body: claimBody }, (error, response, data) => {
-            if ($.getdata(KEY_DEBUG_LOG) === 'true') $.log(`[调试] ${name} 原始响应: ${data}`);
+            if ($.getdata(KEY_DEBUG_LOG) === 'true') rawResponses.push(`${name}: ${data}`);
             resolve(summarize(name, error, data));
         });
     });
