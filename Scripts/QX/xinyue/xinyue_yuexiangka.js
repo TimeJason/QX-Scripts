@@ -119,6 +119,10 @@ function captureFromMyCardList() {
     const card = ownedList.find((u) => u.record_id && u.card_id && u.role);
     if (!card) return $.log('「我的卡」里没有已开通的卡, 已跳过。');
 
+    // channel/pay_channel 不在响应体里, 但「我的卡」的请求体带着, 取真实值而非写死
+    let reqBody = {};
+    try { reqBody = JSON.parse($request.body || '{}'); } catch (e) {}
+
     saveCapture({
         openid,
         token,
@@ -130,8 +134,8 @@ function captureFromMyCardList() {
                 card_group: card.card_group,
                 card_type: card.card_type,
                 card_id: card.card_id,
-                channel: 'vip',
-                pay_channel: 'iap',
+                channel: reqBody.channel || 'vip',
+                pay_channel: reqBody.pay_channel || 'iap',
                 role: card.role,
                 record_id: card.record_id
             }
