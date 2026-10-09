@@ -7,18 +7,19 @@
  * 核心思路:
  *   抓取并保存一次完整的领奖参数 (token + headers + 重建的 body), 之后定时重放。
  *
- * 免点击抓取 (多钩子 + 字段合并):
- *   打开"悦享卡"页面即会触发以下任一接口, 脚本据此自动抓取, 无需手动点"领取":
- *     - GetCardBuyStatus : 打开卡片页必发, 请求体 = 领奖体(去掉 num/record_id/user_info)
- *     - GetCardInfo      : 打开"已开通卡的详情"页时发, 请求体含 record_id
- *     - ReceiveGift      : 点击"领取"时发, 是最精确的领奖体(含 user_info)
- *   多钩子抓到的数据按来源分别保存, 读取时按优先级取舍:
- *     ReceiveGift > GetCardInfo > GetCardBuyStatus
- *   因此随便打开一次相关页面即可攒齐参数, 且不会被"没开通的卡"的字段带偏。
+ * 免点击抓取:
+ *   脚本挂了 3 个接口, 命中任意一个都会自动抓取, 不需要手动点"领取":
+ *     - GetCardInfo      : 打开「我的卡」里已开通卡的详情页时发。请求带 record_id,
+ *                          是判断"你持有哪张卡"的唯一可靠依据, 也是抓取的主来源。
+ *     - ReceiveGift      : 点击"领取"时发。最精确, 含 user_info。
+ *     - GetCardBuyStatus : 卡片的"购买页"会发。注意它 98/198 都发, 且 record_id 恒为空,
+ *                          所以只能用来补 role / 卡片字段, 不足以判定归属。
+ *   判定规则: record_id 非空的来源才算"已开通的卡"。抓到的是购买页(无 record_id)时,
+ *   脚本会提示去打开"我的卡"详情页, 并拒绝用这份草稿去领取。
  *
  * 相比 v9.0:
- *   - 新增 GetCardBuyStatus 钩子, 大幅提高"进页面即抓到"的成功率
- *   - 抓取改为"字段合并", 不同接口互补, 不再要求一次抓全
+ *   - 多钩子自动抓取, 并在抓取时即识别出持有的是哪张卡
+ *   - 领取前校验 record_id, 避免用购买页的残缺参数空跑
  */
 
 const $ = new Env('心悦俱乐部');
@@ -120,6 +121,7 @@ function captureCredentials() {
         sources,
         card_id: resolved.card_id || '',
         record_id: resolved.record_id || '',
+        owned: resolved.owned,
         headers,
         user_info: userInfo,
         claimBody,
@@ -130,28 +132,34 @@ function captureCredentials() {
     const card = resolved.card_id || '?';
     if (idx > -1) {
         accounts[idx] = account;
-        $.msg($.name, '✅ 配置已更新', `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}`);
     } else {
         accounts.push(account);
-        $.msg($.name, '✅ 配置已添加', `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}`);
+    }
+    if (resolved.owned) {
+        $.msg($.name, idx > -1 ? '✅ 配置已更新' : '✅ 配置已添加',
+            `账号: [${nickname}]\n来源: ${label}\n卡片: ${card} (已开通)`);
+    } else {
+        $.msg($.name, '⚠️ 抓到了卡片参数, 但没识别出你开通的卡',
+            `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}\n` +
+            '当前页面只是"购买页", 不含卡片编号。\n' +
+            '请到「我的卡」打开你已开通那张卡的详情页, 再抓一次。');
     }
     $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
     $.log(`当前共 ${accounts.length} 个账号。`);
 }
 
-// 从各来源中按优先级挑出最可靠的一份字段
-// 卡片字段整体取"最高优先级且含 card_id"的那一份, 避免把 A 卡的 gid 和 B 卡的 card_id 拼在一起
+// 从各来源中挑出要领取的卡。
+// 判定依据是 record_id: 只有真正开通的卡, 接口才会带上它。
+//   - GetCardInfo      : 只在"我的卡-已开通卡详情"页发, 请求带 record_id -> 唯一可靠的归属证据
+//   - GetCardBuyStatus : 购买资格查询, 98/198 都发, record_id 恒为空 -> 不能用来判断持有哪张
+//   - ReceiveGift      : 真实领奖包, 带 record_id 和最全的 user_info
+// 因此: 先找 record_id 非空的来源锁定持有的卡; 都没有则退化为草稿(不可用于领取)。
 function resolveSources(sources) {
-    const first = (pred) => {
-        for (const k of SOURCE_ORDER) {
-            const b = sources[k];
-            if (b && pred(b)) return b;
-        }
-        return null;
-    };
-    const card = first((b) => b.card_id) || {};
-    const roleSrc = first((b) => b.role && b.role.role_id) || {};
-    const recSrc = first((b) => b.record_id);
+    const byRank = SOURCE_ORDER.map((k) => sources[k]).filter(Boolean);
+    const owned = byRank.find((b) => b.record_id);
+    const card = owned || byRank.find((b) => b.card_id) || {};
+    const roleSrc = (owned && owned.role && owned.role.role_id ? owned : null)
+        || byRank.find((b) => b.role && b.role.role_id) || {};
     return {
         gid: card.gid,
         card_group: card.card_group,
@@ -160,7 +168,8 @@ function resolveSources(sources) {
         channel: card.channel,
         pay_channel: card.pay_channel,
         role: roleSrc.role,
-        record_id: recSrc ? recSrc.record_id : ''
+        record_id: owned ? owned.record_id : '',
+        owned: !!owned
     };
 }
 
@@ -216,6 +225,9 @@ function claimReward(acc) {
         const { token, openid, nickname, headers, claimBody } = acc;
         if (!headers || !claimBody) {
             return resolve(`👤 [${nickname || openid}]: ❌ 缺少配置, 请重新抓取。`);
+        }
+        if (!acc.record_id) {
+            return resolve(`👤 [${nickname || openid}]: ⚠️ 未识别到已开通的卡, 请打开「我的卡」里那张卡的详情页重新抓取。`);
         }
 
         const dynamicHeaders = { ...headers };
