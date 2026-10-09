@@ -8,17 +8,18 @@
  *   抓取并保存一次完整的领奖参数 (token + headers + 重建的 body), 之后定时重放。
  *
  * 免点击抓取:
- *   脚本挂了 3 个接口, 命中任意一个都会自动抓取, 不需要手动点"领取":
- *     - GetCardInfo      : 打开「我的卡」里已开通卡的详情页时发。请求带 record_id,
- *                          是判断"你持有哪张卡"的唯一可靠依据, 也是抓取的主来源。
+ *   打开悦享卡相关页面即自动抓取, 不需要手动点"领取"。挂了 4 个接口:
+ *     - MyCardList       : 打开「我的卡」页面时发。响应里 my_user_info 直接列出你持有的卡,
+ *                          含 card_id / role / record_id -> 「免点击 + 自动识别」的首选。
+ *     - GetCardInfo      : 已开通卡详情页, 请求带 record_id。
  *     - ReceiveGift      : 点击"领取"时发。最精确, 含 user_info。
  *     - GetCardBuyStatus : 卡片的"购买页"会发。注意它 98/198 都发, 且 record_id 恒为空,
  *                          所以只能用来补 role / 卡片字段, 不足以判定归属。
- *   判定规则: record_id 非空的来源才算"已开通的卡"。抓到的是购买页(无 record_id)时,
- *   脚本会提示去打开"我的卡"详情页, 并拒绝用这份草稿去领取。
+ *   判定规则: record_id 非空的来源才算"已开通的卡"。只抓到购买页(无 record_id)时,
+ *   脚本会提示去打开「我的卡」, 并拒绝用这份草稿去领取。
  *
- * 相比 v9.0:
- *   - 多钩子自动抓取, 并在抓取时即识别出持有的是哪张卡
+ * 相比 v9.1:
+ *   - 新增 MyCardList 钩子(读响应体), 打开「我的卡」即可一次抓全, 且自动选对你持有的卡
  *   - 领取前校验 record_id, 避免用购买页的残缺参数空跑
  */
 
@@ -34,25 +35,45 @@ const KEY_DEBUG_LOG = 'xinyue_debug_log';
 const HOOK_RECEIVE = '/XyCard.CardSrv/ReceiveGift';       // 点击领取, 精确抓取
 const HOOK_GETCARD = '/XyCard.CardSrv/GetCardInfo';       // 已开通卡详情, 含 record_id
 const HOOK_BUYSTATUS = '/XyCard.CardSrv/GetCardBuyStatus'; // 卡片页必发, 含 role
+const HOOK_MYCARD = '/XyCard.CardSrv/MyCardList';         // 「我的卡」列表, 响应即包含持有的卡
+// 需要请求体的钩子
 const HOOKS = [HOOK_BUYSTATUS, HOOK_GETCARD, HOOK_RECEIVE];
+// 需要响应体的钩子 (打开「我的卡」页面即触发, 免点击的首选来源)
+const HOOKS_RES = [HOOK_MYCARD];
 const CLAIM_URL = 'https://bgw.xinyue.qq.com/XyCard.CardSrv/ReceiveGift';
 
-// 数据来源优先级: ReceiveGift > GetCardInfo > GetCardBuyStatus
-// 原因: GetCardBuyStatus 在任意卡片页都会发(可能是没有的卡), 字段最不可靠;
-//       GetCardInfo 只在"已开通卡详情"页发; ReceiveGift 是真实领奖包, 最权威。
-const SOURCE_ORDER = ['receive', 'getcard', 'buystatus'];
+// 数据来源优先级: MyCardList > ReceiveGift > GetCardInfo > GetCardBuyStatus
+//   MyCardList       : 打开「我的卡」即发, 响应直接给出你持有的卡(含 record_id) -> 最权威
+//   ReceiveGift      : 真实领奖包, 含 user_info
+//   GetCardInfo      : 已开通卡详情页, 请求带 record_id
+//   GetCardBuyStatus : 购买页, 98/198 都发且 record_id 恒为空 -> 最不可靠
+const SOURCE_ORDER = ['mycardlist', 'receive', 'getcard', 'buystatus'];
 const SOURCE_LABEL = {
+    mycardlist: '免点击抓取 (MyCardList 我的卡)',
     receive: '精确抓取 (ReceiveGift)',
     getcard: '免点击抓取 (GetCardInfo)',
     buystatus: '免点击抓取 (GetCardBuyStatus)'
 };
 
 if (typeof $request !== 'undefined') {
-    // 重写模式: 抓取参数
-    if ($request.url && HOOKS.some((u) => $request.url.includes(u))) {
-        captureCredentials();
+    if (typeof $response !== 'undefined') {
+        // 响应体模式 (script-response-body): 「我的卡」列表。无论抓取是否成功都要原样放行,
+        // 否则会把 App 的响应吞掉导致页面异常。
+        try {
+            if ($request.url && HOOKS_RES.some((u) => $request.url.includes(u)) && $response.body) {
+                captureFromMyCardList();
+            }
+        } catch (e) {
+            $.logErr(e);
+        }
+        $.done({ body: $response.body });
+    } else {
+        // 请求体模式 (script-request-body)
+        if ($request.url && HOOKS.some((u) => $request.url.includes(u))) {
+            captureCredentials();
+        }
+        $.done();
     }
-    $.done();
 } else {
     // 定时任务模式
     (async () => {
@@ -82,14 +103,55 @@ function captureCredentials() {
         : $request.url.includes(HOOK_GETCARD) ? 'getcard'
         : 'buystatus';
 
+    saveCapture({ openid, token, headers, sourceKey, sources: { [sourceKey]: body } });
+}
+
+// 「我的卡」列表: 请求体不含卡, 但响应里的 my_user_info 直接给出你持有的卡
+// (含 card_id / role / record_id), 是"免点击 + 自动识别持有哪张卡"的首选来源。
+function captureFromMyCardList() {
+    const headers = $request.headers || {};
+    const token = headers['T-ACCESS-TOKEN'] || headers['t-access-token'];
+    const openid = headers['T-OPENID'] || headers['t-openid'];
+    if (!token || !openid) return;
+
+    let res;
+    try { res = JSON.parse($response.body); } catch (e) { return; }
+    if (!res || res.ret !== 0 || !res.data) return;
+
+    const ownedList = Array.isArray(res.data.my_user_info) ? res.data.my_user_info : [];
+    // 只认真正开通的卡: record_id 非空。已过期卡在 expire_user_info 里, 不取。
+    const card = ownedList.find((u) => u.record_id && u.card_id && u.role);
+    if (!card) return $.log('「我的卡」里没有已开通的卡, 已跳过。');
+
+    saveCapture({
+        openid,
+        token,
+        headers,
+        sourceKey: 'mycardlist',
+        sources: {
+            mycardlist: {
+                gid: card.gid,
+                card_group: card.card_group,
+                card_type: card.card_type,
+                card_id: card.card_id,
+                channel: 'vip',
+                pay_channel: 'iap',
+                role: card.role,
+                record_id: card.record_id
+            }
+        }
+    });
+}
+
+// 把某个来源抓到的数据并入配置, 并弹出结果通知
+function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
     let accounts = $.toObj($.getdata(XINYUE_DATA_KEY), []);
     if (!Array.isArray(accounts)) accounts = [];
     const idx = accounts.findIndex((a) => a.openid === openid);
     const prev = idx > -1 ? accounts[idx] : {};
 
     // 按来源分别保存原始包, 读取时按优先级解析, 避免低优先级覆盖高优先级
-    const sources = { ...(prev.sources || {}) };
-    sources[sourceKey] = body;
+    const sources = { ...(prev.sources || {}), ...incoming };
 
     const resolved = resolveSources(sources);
 
@@ -150,9 +212,10 @@ function captureCredentials() {
 
 // 从各来源中挑出要领取的卡。
 // 判定依据是 record_id: 只有真正开通的卡, 接口才会带上它。
-//   - GetCardInfo      : 只在"我的卡-已开通卡详情"页发, 请求带 record_id -> 唯一可靠的归属证据
-//   - GetCardBuyStatus : 购买资格查询, 98/198 都发, record_id 恒为空 -> 不能用来判断持有哪张
+//   - MyCardList       : 打开「我的卡」即发, 响应列出持有的卡(含 record_id) -> 最权威
 //   - ReceiveGift      : 真实领奖包, 带 record_id 和最全的 user_info
+//   - GetCardInfo      : 已开通卡详情页, 请求带 record_id
+//   - GetCardBuyStatus : 购买资格查询, 98/198 都发, record_id 恒为空 -> 不能用来判断持有哪张
 // 因此: 先找 record_id 非空的来源锁定持有的卡; 都没有则退化为草稿(不可用于领取)。
 function resolveSources(sources) {
     const byRank = SOURCE_ORDER.map((k) => sources[k]).filter(Boolean);
