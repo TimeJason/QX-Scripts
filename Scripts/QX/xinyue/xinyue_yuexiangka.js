@@ -1,5 +1,5 @@
 /*
- * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.1 (免点击版)
+ * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.4 (免点击版)
  *
  * 作者: TimeJason
  * 更新日期: 2026-10-09
@@ -8,19 +8,18 @@
  *   抓取并保存一次完整的领奖参数 (token + headers + 重建的 body), 之后定时重放。
  *
  * 免点击抓取:
- *   打开悦享卡相关页面即自动抓取, 不需要手动点"领取"。挂了 4 个接口:
- *     - MyCardList       : 打开「我的卡」页面时发。响应里 my_user_info 直接列出你持有的卡,
- *                          含 card_id / role / record_id -> 「免点击 + 自动识别」的首选。
- *     - GetCardInfo      : 已开通卡详情页, 请求带 record_id。
- *     - ReceiveGift      : 点击"领取"时发。最精确, 含 user_info。
- *     - GetCardBuyStatus : 卡片的"购买页"会发。注意它 98/198 都发, 且 record_id 恒为空,
- *                          所以只能用来补 role / 卡片字段, 不足以判定归属。
- *   判定规则: record_id 非空的来源才算"已开通的卡"。只抓到购买页(无 record_id)时,
- *   脚本会提示去打开「我的卡」, 并拒绝用这份草稿去领取。
+ *   打开「我的卡」页面即自动抓取, 不需要手动点"领取"。挂了 3 个接口:
+ *     - MyCardList  : 打开「我的卡」时发。响应里 my_user_info 直接列出你持有的卡,
+ *                     含 card_id / role / record_id -> 「免点击 + 自动识别」的首选。
+ *     - GetCardInfo : 已开通卡详情页, 请求带 record_id。
+ *     - ReceiveGift : 点击"领取"时发。最精确, 含 user_info。
+ *   判定规则: record_id 非空的来源才算"已开通的卡", 据此自动选中你持有的那张。
+ *   注: 卡片的"购买页"接口 GetCardBuyStatus 不挂钩子 —— 它 98/198 都发且
+ *       record_id 恒为空, 抓到的参数缺字段领不了奖, 只会产生噪音。
  *
- * 相比 v9.1:
- *   - 新增 MyCardList 钩子(读响应体), 打开「我的卡」即可一次抓全, 且自动选对你持有的卡
- *   - 领取前校验 record_id, 避免用购买页的残缺参数空跑
+ * 相比 v9.3:
+ *   - 去掉 GetCardBuyStatus 钩子(缺 record_id, 无意义)
+ *   - 昵称原样保留(有人昵称就是全角空格等不可见字符), 仅通知显示时退回角色名
  */
 
 const $ = new Env('心悦俱乐部');
@@ -34,25 +33,24 @@ const KEY_DEBUG_LOG = 'xinyue_debug_log';
 // --- 接口 ---
 const HOOK_RECEIVE = '/XyCard.CardSrv/ReceiveGift';       // 点击领取, 精确抓取
 const HOOK_GETCARD = '/XyCard.CardSrv/GetCardInfo';       // 已开通卡详情, 含 record_id
-const HOOK_BUYSTATUS = '/XyCard.CardSrv/GetCardBuyStatus'; // 卡片页必发, 含 role
 const HOOK_MYCARD = '/XyCard.CardSrv/MyCardList';         // 「我的卡」列表, 响应即包含持有的卡
 // 需要请求体的钩子
-const HOOKS = [HOOK_BUYSTATUS, HOOK_GETCARD, HOOK_RECEIVE];
+const HOOKS = [HOOK_GETCARD, HOOK_RECEIVE];
 // 需要响应体的钩子 (打开「我的卡」页面即触发, 免点击的首选来源)
 const HOOKS_RES = [HOOK_MYCARD];
 const CLAIM_URL = 'https://bgw.xinyue.qq.com/XyCard.CardSrv/ReceiveGift';
 
-// 数据来源优先级: MyCardList > ReceiveGift > GetCardInfo > GetCardBuyStatus
-//   MyCardList       : 打开「我的卡」即发, 响应直接给出你持有的卡(含 record_id) -> 最权威
-//   ReceiveGift      : 真实领奖包, 含 user_info
-//   GetCardInfo      : 已开通卡详情页, 请求带 record_id
-//   GetCardBuyStatus : 购买页, 98/198 都发且 record_id 恒为空 -> 最不可靠
-const SOURCE_ORDER = ['mycardlist', 'receive', 'getcard', 'buystatus'];
+// 数据来源优先级: MyCardList > ReceiveGift > GetCardInfo
+//   MyCardList  : 打开「我的卡」即发, 响应直接给出你持有的卡(含 record_id) -> 最权威
+//   ReceiveGift : 真实领奖包, 含 user_info
+//   GetCardInfo : 已开通卡详情页, 请求带 record_id
+// 注: 卡片的"购买页"接口 GetCardBuyStatus 不挂钩子 —— 它 98/198 都发且 record_id 恒为空,
+//     抓到的参数缺字段、领不了奖, 只会产生噪音。
+const SOURCE_ORDER = ['mycardlist', 'receive', 'getcard'];
 const SOURCE_LABEL = {
     mycardlist: '免点击抓取 (MyCardList 我的卡)',
     receive: '精确抓取 (ReceiveGift)',
-    getcard: '免点击抓取 (GetCardInfo)',
-    buystatus: '免点击抓取 (GetCardBuyStatus)'
+    getcard: '免点击抓取 (GetCardInfo)'
 };
 
 if (typeof $request !== 'undefined') {
@@ -99,9 +97,7 @@ function captureCredentials() {
     try { body = JSON.parse($request.body); }
     catch (e) { return; }
 
-    const sourceKey = $request.url.includes(HOOK_RECEIVE) ? 'receive'
-        : $request.url.includes(HOOK_GETCARD) ? 'getcard'
-        : 'buystatus';
+    const sourceKey = $request.url.includes(HOOK_RECEIVE) ? 'receive' : 'getcard';
 
     saveCapture({ openid, token, headers, sourceKey, sources: { [sourceKey]: body } });
 }
@@ -172,13 +168,16 @@ function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
     const claimBody = sources.receive
         ? JSON.stringify(sources.receive)
         : buildClaimBody(resolved, userInfo);
-    const nickname = (userInfo && userInfo.nickname && userInfo.nickname.trim())
-        || roleName || `用户_${openid.slice(0, 6)}`;
+    // 昵称: 原样保留抓到的值(有人昵称就是全角空格这类不可见字符, 请求里要原样带回)。
+    // displayName 只用于通知显示 —— 若昵称全是空白, 退回角色名, 免得通知里显示成空的。
+    const nickname = (userInfo && typeof userInfo.nickname === 'string') ? userInfo.nickname : '';
+    const displayName = nickname.trim() || roleName || `用户_${openid.slice(0, 6)}`;
 
     const account = {
         token,
         openid,
         nickname,
+        displayName,
         roleName,
         sources,
         card_id: resolved.card_id || '',
@@ -199,12 +198,10 @@ function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
     }
     if (resolved.owned) {
         $.msg($.name, idx > -1 ? '✅ 配置已更新' : '✅ 配置已添加',
-            `账号: [${nickname}]\n来源: ${label}\n卡片: ${card} (已开通)`);
+            `账号: [${displayName}]\n来源: ${label}\n卡片: ${card} (已开通)`);
     } else {
-        $.msg($.name, '⚠️ 抓到了卡片参数, 但没识别出你开通的卡',
-            `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}\n` +
-            '当前页面只是"购买页", 不含卡片编号。\n' +
-            '请到「我的卡」打开你已开通那张卡的详情页, 再抓一次。');
+        $.msg($.name, '⚠️ 未识别到已开通的卡',
+            `账号: [${displayName}]\n卡片: ${card}\n请打开「我的卡」页面重新抓取。`);
     }
     $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
     $.log(`当前共 ${accounts.length} 个账号。`);
@@ -285,12 +282,14 @@ async function runTasks() {
 
 function claimReward(acc) {
     return new Promise((resolve) => {
-        const { token, openid, nickname, headers, claimBody } = acc;
+        const { token, openid, headers, claimBody } = acc;
+        // displayName 优先; 兼容 v9.2 及更早存的配置(那时 nickname 存的是显示名)
+        const name = acc.displayName || acc.nickname || openid;
         if (!headers || !claimBody) {
-            return resolve(`👤 [${nickname || openid}]: ❌ 缺少配置, 请重新抓取。`);
+            return resolve(`👤 [${name}]: ❌ 缺少配置, 请重新抓取。`);
         }
         if (!acc.record_id) {
-            return resolve(`👤 [${nickname || openid}]: ⚠️ 未识别到已开通的卡, 请打开「我的卡」里那张卡的详情页重新抓取。`);
+            return resolve(`👤 [${name}]: ⚠️ 未识别到已开通的卡, 请打开「我的卡」页面重新抓取。`);
         }
 
         const dynamicHeaders = { ...headers };
@@ -298,16 +297,16 @@ function claimReward(acc) {
         dynamicHeaders['T-OPENID'] = openid;
         delete dynamicHeaders['Content-Length'];
 
-        $.log(`\n▶️ [${nickname}] 开始领取...`);
+        $.log(`\n▶️ [${name}] 开始领取...`);
         $.post({ url: CLAIM_URL, method: 'POST', headers: dynamicHeaders, body: claimBody }, (error, response, data) => {
-            if ($.getdata(KEY_DEBUG_LOG) === 'true') $.log(`[调试] ${nickname} 原始响应: ${data}`);
-            resolve(summarize(nickname, error, data));
+            if ($.getdata(KEY_DEBUG_LOG) === 'true') $.log(`[调试] ${name} 原始响应: ${data}`);
+            resolve(summarize(name, error, data));
         });
     });
 }
 
-function summarize(nickname, error, data) {
-    const head = `👤 [${nickname}]: `;
+function summarize(name, error, data) {
+    const head = `👤 [${name}]: `;
     try {
         if (error) throw new Error(error);
         const res = JSON.parse(data);
