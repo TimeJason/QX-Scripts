@@ -1,15 +1,24 @@
 /*
- * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.0 (免点击版)
+ * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.1 (免点击版)
  *
  * 作者: TimeJason
  * 更新日期: 2026-10-09
  *
- * 相比 v8.8 的改动:
- *   1. 免点击: 只需进入"悦享卡"页面(触发 GetCardInfo)即可自动抓取 token/角色/记录ID,
- *      无需再手动点一次"领取"。GetCardInfo 的请求头带 token, 请求体带 role 和 record_id。
- *   2. 点击"领取"(ReceiveGift)时抓取最精确的 body, 并缓存其中的 user_info, 覆盖第 1 步的数据。
- *   3. 修复奖励名称上报错误(gift_info 是数组, 原来只取 [0] 会报成"续费开通礼包")。
- *   4. 统一非 0 返回值的失败提示; 角色名从 role_name(base64) 自动解码用于通知。
+ * 核心思路:
+ *   抓取并保存一次完整的领奖参数 (token + headers + 重建的 body), 之后定时重放。
+ *
+ * 免点击抓取 (多钩子 + 字段合并):
+ *   打开"悦享卡"页面即会触发以下任一接口, 脚本据此自动抓取, 无需手动点"领取":
+ *     - GetCardBuyStatus : 打开卡片页必发, 请求体 = 领奖体(去掉 num/record_id/user_info)
+ *     - GetCardInfo      : 打开"已开通卡的详情"页时发, 请求体含 record_id
+ *     - ReceiveGift      : 点击"领取"时发, 是最精确的领奖体(含 user_info)
+ *   多钩子抓到的数据按来源分别保存, 读取时按优先级取舍:
+ *     ReceiveGift > GetCardInfo > GetCardBuyStatus
+ *   因此随便打开一次相关页面即可攒齐参数, 且不会被"没开通的卡"的字段带偏。
+ *
+ * 相比 v9.0:
+ *   - 新增 GetCardBuyStatus 钩子, 大幅提高"进页面即抓到"的成功率
+ *   - 抓取改为"字段合并", 不同接口互补, 不再要求一次抓全
  */
 
 const $ = new Env('心悦俱乐部');
@@ -21,13 +30,25 @@ const KEY_NOTIFY_SUCCESS = 'xinyue_notify_success';
 const KEY_DEBUG_LOG = 'xinyue_debug_log';
 
 // --- 接口 ---
-const HOOK_GETCARD = '/XyCard.CardSrv/GetCardInfo';   // 进入页面触发, 免点击抓取
-const HOOK_RECEIVE = '/XyCard.CardSrv/ReceiveGift';   // 点击领取触发, 精确抓取
+const HOOK_RECEIVE = '/XyCard.CardSrv/ReceiveGift';       // 点击领取, 精确抓取
+const HOOK_GETCARD = '/XyCard.CardSrv/GetCardInfo';       // 已开通卡详情, 含 record_id
+const HOOK_BUYSTATUS = '/XyCard.CardSrv/GetCardBuyStatus'; // 卡片页必发, 含 role
+const HOOKS = [HOOK_BUYSTATUS, HOOK_GETCARD, HOOK_RECEIVE];
 const CLAIM_URL = 'https://bgw.xinyue.qq.com/XyCard.CardSrv/ReceiveGift';
+
+// 数据来源优先级: ReceiveGift > GetCardInfo > GetCardBuyStatus
+// 原因: GetCardBuyStatus 在任意卡片页都会发(可能是没有的卡), 字段最不可靠;
+//       GetCardInfo 只在"已开通卡详情"页发; ReceiveGift 是真实领奖包, 最权威。
+const SOURCE_ORDER = ['receive', 'getcard', 'buystatus'];
+const SOURCE_LABEL = {
+    receive: '精确抓取 (ReceiveGift)',
+    getcard: '免点击抓取 (GetCardInfo)',
+    buystatus: '免点击抓取 (GetCardBuyStatus)'
+};
 
 if (typeof $request !== 'undefined') {
     // 重写模式: 抓取参数
-    if ($request.url && ($request.url.includes(HOOK_GETCARD) || $request.url.includes(HOOK_RECEIVE))) {
+    if ($request.url && HOOKS.some((u) => $request.url.includes(u))) {
         captureCredentials();
     }
     $.done();
@@ -45,39 +66,49 @@ function captureCredentials() {
     if ($request.method !== 'POST') {
         return $.log(`捕获到非 POST(${$request.method}) 请求, 已跳过。`);
     }
-    if (!$request.body) return $.msg($.name, '获取失败', '未读取到请求体 (Body)。');
+    if (!$request.body) return;
 
     const headers = $request.headers || {};
     const token = headers['T-ACCESS-TOKEN'] || headers['t-access-token'];
     const openid = headers['T-OPENID'] || headers['t-openid'];
-    if (!token || !openid) return $.msg($.name, '获取失败', '未从请求头找到身份凭证 (token/openid)。');
+    if (!token || !openid) return;
 
     let body;
     try { body = JSON.parse($request.body); }
-    catch (e) { return $.msg($.name, '获取失败', '请求体不是合法 JSON。'); }
+    catch (e) { return; }
 
-    const isClaim = $request.url.includes(HOOK_RECEIVE);
+    const sourceKey = $request.url.includes(HOOK_RECEIVE) ? 'receive'
+        : $request.url.includes(HOOK_GETCARD) ? 'getcard'
+        : 'buystatus';
 
     let accounts = $.toObj($.getdata(XINYUE_DATA_KEY), []);
     if (!Array.isArray(accounts)) accounts = [];
     const idx = accounts.findIndex((a) => a.openid === openid);
     const prev = idx > -1 ? accounts[idx] : {};
 
-    // 角色名: role_name 是 base64, 解出真实角色名
+    // 按来源分别保存原始包, 读取时按优先级解析, 避免低优先级覆盖高优先级
+    const sources = { ...(prev.sources || {}) };
+    sources[sourceKey] = body;
+
+    const resolved = resolveSources(sources);
+
+    // user_info: ReceiveGift 自带, 否则复用历史缓存
+    let userInfo = prev.userInfo || null;
+    if (sources.receive && sources.receive.user_info
+        && (sources.receive.user_info.nickname || sources.receive.user_info.avatar)) {
+        userInfo = sources.receive.user_info;
+    }
+
     let roleName = prev.roleName || '';
-    if (body.role && body.role.role_name) {
-        const decoded = b64DecodeUtf8(body.role.role_name);
+    if (resolved.role && resolved.role.role_name) {
+        const decoded = b64DecodeUtf8(resolved.role.role_name);
         if (decoded) roleName = decoded;
     }
 
-    // user_info: 优先本次(通常来自 ReceiveGift), 其次复用历史缓存
-    let userInfo = prev.userInfo || null;
-    if (body.user_info && (body.user_info.nickname || body.user_info.avatar)) {
-        userInfo = body.user_info;
-    }
-
-    // 领奖 body: 点领取时用抓到的原始包; 进页面时用 GetCardInfo 的 body 现场重建
-    const claimBody = isClaim ? $request.body : buildClaimBody(body, userInfo);
+    // 领奖 body: 有真实的 ReceiveGift 包就直接用, 否则用合并字段重建
+    const claimBody = sources.receive
+        ? JSON.stringify(sources.receive)
+        : buildClaimBody(resolved, userInfo);
     const nickname = (userInfo && userInfo.nickname && userInfo.nickname.trim())
         || roleName || `用户_${openid.slice(0, 6)}`;
 
@@ -86,38 +117,66 @@ function captureCredentials() {
         openid,
         nickname,
         roleName,
-        record_id: body.record_id,
+        sources,
+        card_id: resolved.card_id || '',
+        record_id: resolved.record_id || '',
         headers,
         user_info: userInfo,
         claimBody,
         updatedAt: new Date().toISOString()
     };
 
-    const source = isClaim ? '精确抓取 (ReceiveGift)' : '免点击抓取 (GetCardInfo)';
+    const label = SOURCE_LABEL[sourceKey];
+    const card = resolved.card_id || '?';
     if (idx > -1) {
         accounts[idx] = account;
-        $.msg($.name, '✅ 配置已更新', `账号: [${nickname}]\n来源: ${source}`);
+        $.msg($.name, '✅ 配置已更新', `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}`);
     } else {
         accounts.push(account);
-        $.msg($.name, '✅ 配置已添加', `账号: [${nickname}]\n来源: ${source}`);
+        $.msg($.name, '✅ 配置已添加', `账号: [${nickname}]\n来源: ${label}\n卡片: ${card}`);
     }
     $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
     $.log(`当前共 ${accounts.length} 个账号。`);
 }
 
-// 用 GetCardInfo 的 body 重建 ReceiveGift 的 body
-function buildClaimBody(src, userInfo) {
+// 从各来源中按优先级挑出最可靠的一份字段
+// 卡片字段整体取"最高优先级且含 card_id"的那一份, 避免把 A 卡的 gid 和 B 卡的 card_id 拼在一起
+function resolveSources(sources) {
+    const first = (pred) => {
+        for (const k of SOURCE_ORDER) {
+            const b = sources[k];
+            if (b && pred(b)) return b;
+        }
+        return null;
+    };
+    const card = first((b) => b.card_id) || {};
+    const roleSrc = first((b) => b.role && b.role.role_id) || {};
+    const recSrc = first((b) => b.record_id);
+    return {
+        gid: card.gid,
+        card_group: card.card_group,
+        card_type: card.card_type,
+        card_id: card.card_id,
+        channel: card.channel,
+        pay_channel: card.pay_channel,
+        role: roleSrc.role,
+        record_id: recSrc ? recSrc.record_id : ''
+    };
+}
+
+// 用合并后的字段重建 ReceiveGift 的 body
+function buildClaimBody(fields, userInfo) {
     return JSON.stringify({
-        gid: src.gid,
-        card_group: src.card_group,
-        card_type: src.card_type,
-        card_id: src.card_id,
-        channel: src.channel || 'vip',
-        pay_channel: src.pay_channel || 'iap',
-        platform: 'ios',                    // GetCardInfo 用 tgclubApp, 领奖必须用 ios
-        role: src.role,
-        num: 1,                             // 领奖新增
-        record_id: src.record_id,
+        gid: fields.gid,
+        card_group: fields.card_group,
+        card_type: fields.card_type,
+        card_id: fields.card_id,
+        channel: fields.channel || 'vip',
+        pay_channel: fields.pay_channel || 'iap',
+        platform: 'ios',                    // 领奖必须用 ios
+        role: fields.role,
+        num: 1,
+        record_id: fields.record_id || '',
         user_info: userInfo || { avatar: '', nickname: '' }
     });
 }
