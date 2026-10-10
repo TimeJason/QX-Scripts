@@ -1,5 +1,5 @@
 /*
- * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.6 (免点击版)
+ * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.7 (免点击版)
  *
  * 作者: TimeJason
  * 更新日期: 2026-10-10
@@ -17,12 +17,9 @@
  *   注: 卡片的"购买页"接口 GetCardBuyStatus 不挂钩子 —— 它 98/198 都发且
  *       record_id 恒为空, 抓到的参数缺字段领不了奖, 只会产生噪音。
  *
- * 相比 v9.5:
- *   - 领取前先实时查询一次「我的卡」(MyCardList, 只读): 卡种/剩余天数/已领进度/到期日全部实时
- *   - 续费自愈: 实时查到新 record_id 时自动重建领奖 body, 续费后无需重新抓取
- *   - 过期感知: 查不到有效卡时跳过领取, 提示续费
- *   - 通知增强: "198悦享卡 · 本期已领 x/30 天 · 剩 N 天 (MM-dd 到期)" + 临期续费提醒
- *   - 临期提醒阈值 BoxJs 可调: xinyue_renew_warn_days (默认 7 天)
+ * 相比 v9.6:
+ *   - 日志分工: 过程逐步展示 (📡 查卡 -> 🎫 卡片详情 -> 🎁 领取 -> 结果),
+ *     汇总区改为每账号单行摘要, 多行富信息块只进系统通知, 不再重复
  */
 
 const $ = new Env('心悦俱乐部');
@@ -404,14 +401,19 @@ function applyLiveCard(acc, { owned, cardInfo }) {
     $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
 
     if (updated.record_id && updated.record_id !== prev.record_id) {
-        $.log(`🔁 检测到新一期卡片 (record_id ${prev.record_id || '无'} -> ${updated.record_id}), 已自动重建领奖参数。`);
+        const oldTail = prev.record_id ? `...${String(prev.record_id).slice(-4)}` : '无';
+        $.log(`  🔁 检测到新一期卡片 (record_id ${oldTail} -> ...${String(updated.record_id).slice(-4)}), 领奖参数已自动重建`);
     }
     return updated;
 }
 
 // 单账号完整流程: 实时查卡 -> (自愈/过期判断) -> 领取 -> 组装富信息结果块
+// 日志里逐步展示过程 (查到什么/变没变/领得如何), 富信息块留给系统通知
 async function processAccount(acc) {
     const name = acc.displayName || acc.nickname || acc.openid;
+    $.log(`\n▶️ [${name}]`);
+    $.log('  📡 查询「我的卡」最新状态...');
+
     const live = await queryCardStatus(acc);
 
     let claimAcc = acc;
@@ -419,6 +421,7 @@ async function processAccount(acc) {
 
     if (live.status === 'nocard') {
         // 卡已过期或未开通: 不再盲发领奖请求
+        $.log('  ❌ 服务器确认: 当前没有有效悦享卡 (已过期/未开通), 跳过领取');
         const until = cardInfo && cardInfo.end_time ? ` (${fmtDate(cardInfo.end_time)} 到期)` : '';
         return [
             `👤 [${name}] ❌ 未查询到有效悦享卡${until}, 今日未领取`,
@@ -428,12 +431,21 @@ async function processAccount(acc) {
     if (live.status === 'ok') {
         claimAcc = applyLiveCard(acc, live);
         cardInfo = live.cardInfo;
+        const ci = live.cardInfo;
+        const period = ci.start_time ? `本期 ${fmtDate(ci.start_time)} ~ ${fmtDate(ci.end_time)}` : `至 ${fmtDate(ci.end_time)} 到期`;
+        const prog = ci.gift_total_num ? `已领 ${ci.gift_got_num}/${ci.gift_total_num} 天` : '';
+        $.log(`  🎫 ${cardLabel(ci, null)} · ${period}${prog ? ' · ' + prog : ''} · record_id ...${String(claimAcc.record_id).slice(-4)}`);
     } else {
-        $.log(`[${name}] 实时查询失败, 使用本地缓存信息继续。`);
+        $.log('  ⚠️ 实时查询失败, 使用本地缓存信息继续');
     }
 
+    $.log('  🎁 发起领取请求...');
     const claimLine = await claimReward(claimAcc);
-    return buildAccountBlock(name, claimLine, cardInfo);
+    const block = buildAccountBlock(name, claimLine, cardInfo);
+    $.log('  ' + block[1]);
+    const warnLine = block.find((l) => /^(‼️|❗️|⏰)/.test(l));
+    if (warnLine) $.log('  ' + warnLine);
+    return block;
 }
 
 // 把领取结果 + 卡片状态组装成多行展示块
@@ -484,7 +496,7 @@ async function runTasks() {
         if (i < accounts.length - 1) await $.wait(2000);
     }
 
-    // 日志里先用中文逐条列出结果, 再发系统通知
+    // 日志: 过程细节已在上文逐步展示, 这里只留单行摘要; 完整富信息块交给系统通知
     const ok = blocks.filter((b) => b.some((l) => l.includes('✅'))).length;
     const rep = blocks.filter((b) => !b.some((l) => l.includes('✅')) && b.some((l) => l.includes('🔁'))).length;
     const warnN = blocks.filter((b) => b.some((l) => l.includes('⚠️'))).length;
@@ -492,8 +504,7 @@ async function runTasks() {
     $.log();
     $.log('──────────── 执行结果 ────────────');
     blocks.forEach((block, i) => {
-        $.log(`  ${i + 1}. ${block[0].replace(/^👤\s*/, '')}`);
-        block.slice(1).forEach((l) => $.log(`     ${l}`));
+        $.log(`  ${i + 1}. ${block.map((l) => l.replace(/^👤\s*/, '')).join(' · ')}`);
     });
     $.log(`  共 ${blocks.length} 个账号 · 成功 ${ok} · 重复 ${rep}`
         + (warnN ? ` · 待处理 ${warnN}` : '') + (fail ? ` · 失败 ${fail}` : ''));
@@ -524,7 +535,7 @@ function claimReward(acc) {
         dynamicHeaders['T-OPENID'] = openid;
         delete dynamicHeaders['Content-Length'];
 
-        $.log(`\n▶️ [${name}] 开始领取...`);
+        // 过程日志由 processAccount 统一输出 (▶️/📡/🎫/🎁)
         $.post({ url: CLAIM_URL, method: 'POST', headers: dynamicHeaders, body: claimBody }, (error, response, data) => {
             if ($.getdata(KEY_DEBUG_LOG) === 'true') rawResponses.push(`${name}: ${data}`);
             resolve(summarize(name, error, data));
