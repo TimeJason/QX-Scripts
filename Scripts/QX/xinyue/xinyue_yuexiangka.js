@@ -1,8 +1,8 @@
 /*
- * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.5 (免点击版)
+ * 心悦俱乐部悦享卡每日奖励自动领取脚本 v9.6 (免点击版)
  *
  * 作者: TimeJason
- * 更新日期: 2026-10-09
+ * 更新日期: 2026-10-10
  *
  * 核心思路:
  *   抓取并保存一次完整的领奖参数 (token + headers + 重建的 body), 之后定时重放。
@@ -17,8 +17,12 @@
  *   注: 卡片的"购买页"接口 GetCardBuyStatus 不挂钩子 —— 它 98/198 都发且
  *       record_id 恒为空, 抓到的参数缺字段领不了奖, 只会产生噪音。
  *
- * 相比 v9.4:
- *   - 日志排版: 先用中文逐条列出各项结果并统计, 再发通知; 原始响应统一挪到"结束"之后
+ * 相比 v9.5:
+ *   - 领取前先实时查询一次「我的卡」(MyCardList, 只读): 卡种/剩余天数/已领进度/到期日全部实时
+ *   - 续费自愈: 实时查到新 record_id 时自动重建领奖 body, 续费后无需重新抓取
+ *   - 过期感知: 查不到有效卡时跳过领取, 提示续费
+ *   - 通知增强: "198悦享卡 · 本期已领 x/30 天 · 剩 N 天 (MM-dd 到期)" + 临期续费提醒
+ *   - 临期提醒阈值 BoxJs 可调: xinyue_renew_warn_days (默认 7 天)
  */
 
 const $ = new Env('心悦俱乐部');
@@ -28,6 +32,7 @@ const notify = $.isNode() ? require('./sendNotify') : '';
 const XINYUE_DATA_KEY = 'xinyue_datas';
 const KEY_NOTIFY_SUCCESS = 'xinyue_notify_success';
 const KEY_DEBUG_LOG = 'xinyue_debug_log';
+const KEY_RENEW_WARN = 'xinyue_renew_warn_days';   // 临期提醒阈值(天), 默认 7
 
 // --- 接口 ---
 const HOOK_RECEIVE = '/XyCard.CardSrv/ReceiveGift';       // 点击领取, 精确抓取
@@ -38,6 +43,7 @@ const HOOKS = [HOOK_GETCARD, HOOK_RECEIVE];
 // 需要响应体的钩子 (打开「我的卡」页面即触发, 免点击的首选来源)
 const HOOKS_RES = [HOOK_MYCARD];
 const CLAIM_URL = 'https://bgw.xinyue.qq.com/XyCard.CardSrv/ReceiveGift';
+const MYCARD_URL = 'https://bgw.xinyue.qq.com/XyCard.CardSrv/MyCardList';
 
 // 数据来源优先级: MyCardList > ReceiveGift > GetCardInfo
 //   MyCardList  : 打开「我的卡」即发, 响应直接给出你持有的卡(含 record_id) -> 最权威
@@ -117,6 +123,55 @@ function captureCredentials() {
     saveCapture({ openid, token, headers, sourceKey, sources: { [sourceKey]: body } });
 }
 
+// 从 MyCardList 响应里解析持有的卡及其展示信息 (价格/到期/进度)。
+// 返回 { owned, cardInfo } 或 null。cardInfo 供通知展示, 不参与领奖 body。
+function parseMyCardList(res) {
+    if (!res || res.ret !== 0 || !res.data) return null;
+    const ownedList = Array.isArray(res.data.my_user_info) ? res.data.my_user_info : [];
+    // 只认真正开通的卡: record_id 非空。已过期卡在 expire_user_info 里, 不取。
+    const owned = ownedList.find((u) => u.record_id && u.card_id && u.role) || null;
+    if (!owned) return { owned: null, cardInfo: null };
+
+    const cfgKey = `${owned.gid}:${owned.card_type}:${owned.card_id}`;
+    const cfg = res.data.cards && res.data.cards[cfgKey] && res.data.cards[cfgKey].base_info
+        ? res.data.cards[cfgKey].base_info : null;
+    const month = owned.month && owned.month.base_info ? owned.month.base_info : null;
+
+    const cardInfo = {
+        title: (cfg && cfg.card_title) || '悦享卡',
+        price: cfg && cfg.guide_price ? Math.round(cfg.guide_price / 100) : null,
+        start_time: month ? month.start_time : null,
+        end_time: month ? month.end_time : null,
+        gift_got_num: month ? month.gift_got_num : null,
+        gift_total_num: month ? month.gift_total_num : null,
+        checkedAt: Date.now()
+    };
+    return { owned, cardInfo };
+}
+
+// 卡片显示名: 有价格用 "198悦享卡"; 没有则退回 card_id (如 yxk981, 价格未知)
+function cardLabel(cardInfo, cardId) {
+    if (cardInfo && cardInfo.price) return `${cardInfo.price}${cardInfo.title || '悦享卡'}`;
+    return cardId || '悦享卡';
+}
+
+// 秒级时间戳 -> "MM-dd"
+function fmtDate(sec) {
+    if (!sec) return '';
+    const d = new Date(sec * 1000);
+    const p = (n) => (n < 10 ? '0' + n : '' + n);
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 距到期还剩几个自然日 (当天到期 = 0)
+function daysLeft(sec) {
+    if (!sec) return null;
+    const e = new Date(sec * 1000), n = new Date();
+    const e0 = new Date(e.getFullYear(), e.getMonth(), e.getDate());
+    const n0 = new Date(n.getFullYear(), n.getMonth(), n.getDate());
+    return Math.round((e0 - n0) / 86400000);
+}
+
 // 「我的卡」列表: 请求体不含卡, 但响应里的 my_user_info 直接给出你持有的卡
 // (含 card_id / role / record_id), 是"免点击 + 自动识别持有哪张卡"的首选来源。
 function captureFromMyCardList() {
@@ -127,12 +182,10 @@ function captureFromMyCardList() {
 
     let res;
     try { res = JSON.parse($response.body); } catch (e) { return; }
-    if (!res || res.ret !== 0 || !res.data) return;
-
-    const ownedList = Array.isArray(res.data.my_user_info) ? res.data.my_user_info : [];
-    // 只认真正开通的卡: record_id 非空。已过期卡在 expire_user_info 里, 不取。
-    const card = ownedList.find((u) => u.record_id && u.card_id && u.role);
-    if (!card) return $.log('「我的卡」里没有已开通的卡, 已跳过。');
+    const parsed = parseMyCardList(res);
+    if (!parsed) return;
+    if (!parsed.owned) return $.log('「我的卡」里没有已开通的卡, 已跳过。');
+    const card = parsed.owned;
 
     // channel/pay_channel 不在响应体里, 但「我的卡」的请求体带着, 取真实值而非写死
     let reqBody = {};
@@ -143,6 +196,7 @@ function captureFromMyCardList() {
         token,
         headers,
         sourceKey: 'mycardlist',
+        cardInfo: parsed.cardInfo,
         sources: {
             mycardlist: {
                 gid: card.gid,
@@ -159,19 +213,44 @@ function captureFromMyCardList() {
 }
 
 // 把某个来源抓到的数据并入配置, 并弹出结果通知
-function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
+function saveCapture({ openid, token, headers, sources: incoming, sourceKey, cardInfo }) {
     let accounts = $.toObj($.getdata(XINYUE_DATA_KEY), []);
     if (!Array.isArray(accounts)) accounts = [];
     const idx = accounts.findIndex((a) => a.openid === openid);
     const prev = idx > -1 ? accounts[idx] : {};
 
+    const account = buildAccountRecord(prev, { openid, token, headers, sources: incoming, cardInfo });
+
+    if (idx > -1) {
+        accounts[idx] = account;
+    } else {
+        accounts.push(account);
+    }
+
+    const label = SOURCE_LABEL[sourceKey];
+    const card = cardLabel(account.cardInfo, account.card_id);
+    if (account.owned) {
+        const expiry = account.cardInfo && account.cardInfo.end_time
+            ? ` · ${fmtDate(account.cardInfo.end_time)} 到期` : '';
+        $.msg($.name, idx > -1 ? '✅ 配置已更新' : '✅ 配置已添加',
+            `账号: [${account.displayName}]\n来源: ${label}\n卡片: ${card} (已开通${expiry})`);
+    } else {
+        $.msg($.name, '⚠️ 未识别到已开通的卡',
+            `账号: [${account.displayName}]\n卡片: ${card}\n请打开「我的卡」页面重新抓取。`);
+    }
+    $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
+    $.log(`当前共 ${accounts.length} 个账号。`);
+}
+
+// 由历史记录 + 新数据构建账号存储结构。抓取与"续费自愈"共用。
+function buildAccountRecord(prev, { openid, token, headers, sources: incoming, cardInfo }) {
     // 按来源分别保存原始包, 读取时按优先级解析, 避免低优先级覆盖高优先级
     const sources = { ...(prev.sources || {}), ...incoming };
 
     const resolved = resolveSources(sources);
 
     // user_info: ReceiveGift 自带, 否则复用历史缓存
-    let userInfo = prev.userInfo || null;
+    let userInfo = prev.user_info || null;
     if (sources.receive && sources.receive.user_info
         && (sources.receive.user_info.nickname || sources.receive.user_info.avatar)) {
         userInfo = sources.receive.user_info;
@@ -192,7 +271,7 @@ function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
     const nickname = (userInfo && typeof userInfo.nickname === 'string') ? userInfo.nickname : '';
     const displayName = nickname.trim() || roleName || `用户_${openid.slice(0, 6)}`;
 
-    const account = {
+    return {
         token,
         openid,
         nickname,
@@ -205,25 +284,9 @@ function saveCapture({ openid, token, headers, sources: incoming, sourceKey }) {
         headers,
         user_info: userInfo,
         claimBody,
+        cardInfo: cardInfo || prev.cardInfo || null,
         updatedAt: new Date().toISOString()
     };
-
-    const label = SOURCE_LABEL[sourceKey];
-    const card = resolved.card_id || '?';
-    if (idx > -1) {
-        accounts[idx] = account;
-    } else {
-        accounts.push(account);
-    }
-    if (resolved.owned) {
-        $.msg($.name, idx > -1 ? '✅ 配置已更新' : '✅ 配置已添加',
-            `账号: [${displayName}]\n来源: ${label}\n卡片: ${card} (已开通)`);
-    } else {
-        $.msg($.name, '⚠️ 未识别到已开通的卡',
-            `账号: [${displayName}]\n卡片: ${card}\n请打开「我的卡」页面重新抓取。`);
-    }
-    $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
-    $.log(`当前共 ${accounts.length} 个账号。`);
 }
 
 // 从各来源中挑出要领取的卡。
@@ -271,6 +334,137 @@ function buildClaimBody(fields, userInfo) {
 
 /* ========================== 定时领取 ========================== */
 
+// 领取前实时查询「我的卡」(只读)。拿到: 当前持有的卡(含最新 record_id)、
+// 价格/到期日/已领进度。返回:
+//   { status: 'ok', owned, cardInfo }  查询成功
+//   { status: 'nocard' }               查询成功但没有有效卡 (已过期/未开通)
+//   { status: 'fail' }                 查询失败, 调用方退回本地缓存
+function queryCardStatus(acc) {
+    return new Promise((resolve) => {
+        if (!acc.headers) return resolve({ status: 'fail' });
+        const headers = { ...acc.headers };
+        headers['T-ACCESS-TOKEN'] = acc.token;
+        headers['T-OPENID'] = acc.openid;
+        delete headers['Content-Length'];
+
+        // MyCardList 的请求体不含任何卡信息, channel/pay_channel 用存的真值
+        const src = (acc.sources && acc.sources.mycardlist) || {};
+        const body = JSON.stringify({
+            channel: src.channel || 'vip',
+            pay_channel: src.pay_channel || 'iap',
+            device: 'ios',
+            platform: 'tgclubApp'
+        });
+
+        $.post({ url: MYCARD_URL, method: 'POST', headers, body }, (error, response, data) => {
+            if (error) return resolve({ status: 'fail' });
+            try {
+                const res = JSON.parse(data);
+                const parsed = parseMyCardList(res);
+                if (!parsed || !parsed.owned) return resolve({ status: 'nocard' });
+                resolve({ status: 'ok', owned: parsed.owned, cardInfo: parsed.cardInfo });
+            } catch (e) {
+                resolve({ status: 'fail' });
+            }
+        });
+    });
+}
+
+// 实时查到的卡并回本地配置 (静默, 不发通知)。
+// 续费后 record_id 会变 —— 这里自动重建领奖 body, 用户无需重新抓取。
+function applyLiveCard(acc, { owned, cardInfo }) {
+    let accounts = $.toObj($.getdata(XINYUE_DATA_KEY), []);
+    if (!Array.isArray(accounts)) accounts = [];
+    const idx = accounts.findIndex((a) => a.openid === acc.openid);
+    const prev = idx > -1 ? accounts[idx] : acc;
+
+    const oldSrc = (prev.sources && prev.sources.mycardlist) || {};
+    const updated = buildAccountRecord(prev, {
+        openid: acc.openid,
+        token: acc.token,
+        headers: acc.headers,
+        cardInfo,
+        sources: {
+            mycardlist: {
+                gid: owned.gid,
+                card_group: owned.card_group,
+                card_type: owned.card_type,
+                card_id: owned.card_id,
+                channel: oldSrc.channel || 'vip',
+                pay_channel: oldSrc.pay_channel || 'iap',
+                role: owned.role,
+                record_id: owned.record_id
+            }
+        }
+    });
+    // T-GID 随卡走, 防止换卡后请求头还带着旧 gid
+    if (owned.gid && updated.headers) updated.headers['T-GID'] = String(owned.gid);
+
+    if (idx > -1) accounts[idx] = updated; else accounts.push(updated);
+    $.setdata(JSON.stringify(accounts), XINYUE_DATA_KEY);
+
+    if (updated.record_id && updated.record_id !== prev.record_id) {
+        $.log(`🔁 检测到新一期卡片 (record_id ${prev.record_id || '无'} -> ${updated.record_id}), 已自动重建领奖参数。`);
+    }
+    return updated;
+}
+
+// 单账号完整流程: 实时查卡 -> (自愈/过期判断) -> 领取 -> 组装富信息结果块
+async function processAccount(acc) {
+    const name = acc.displayName || acc.nickname || acc.openid;
+    const live = await queryCardStatus(acc);
+
+    let claimAcc = acc;
+    let cardInfo = acc.cardInfo || null;
+
+    if (live.status === 'nocard') {
+        // 卡已过期或未开通: 不再盲发领奖请求
+        const until = cardInfo && cardInfo.end_time ? ` (${fmtDate(cardInfo.end_time)} 到期)` : '';
+        return [
+            `👤 [${name}] ❌ 未查询到有效悦享卡${until}, 今日未领取`,
+            `💡 App 内续费后, 明早自动恢复领取 (无需重新配置)`
+        ];
+    }
+    if (live.status === 'ok') {
+        claimAcc = applyLiveCard(acc, live);
+        cardInfo = live.cardInfo;
+    } else {
+        $.log(`[${name}] 实时查询失败, 使用本地缓存信息继续。`);
+    }
+
+    const claimLine = await claimReward(claimAcc);
+    return buildAccountBlock(name, claimLine, cardInfo);
+}
+
+// 把领取结果 + 卡片状态组装成多行展示块
+function buildAccountBlock(name, claimLine, cardInfo) {
+    const result = claimLine.replace(/^👤\s*\[[^\]]*\]:\s*/, '');
+    if (!cardInfo || !cardInfo.end_time) return [`👤 [${name}]`, result];
+
+    const label = cardLabel(cardInfo, null);
+    const d = daysLeft(cardInfo.end_time);
+    const until = fmtDate(cardInfo.end_time);
+    const block = [`👤 [${name}] 🎫 ${label}`, result];
+
+    if (cardInfo.gift_total_num) {
+        // 查询发生在领取前: 今天领取成功则已领数 +1; "今日已领取"说明 App 里领过, 不加
+        const delta = result.includes('✅') && !result.includes('无可领') ? 1 : 0;
+        const got = Math.min((cardInfo.gift_got_num || 0) + delta, cardInfo.gift_total_num);
+        block.push(`📊 本期已领 ${got}/${cardInfo.gift_total_num} 天 · 剩 ${d} 天 (${until} 到期)`);
+    } else {
+        block.push(`⏳ 剩 ${d} 天 (${until} 到期)`);
+    }
+
+    // 临期续费提醒 (阈值 BoxJs 可调, 默认 7 天)
+    const warn = parseInt($.getdata(KEY_RENEW_WARN), 10) || 7;
+    if (d !== null && d >= 0) {
+        if (d === 0) block.push('‼️ 今天是本期最后一天, 记得续费');
+        else if (d <= 3) block.push(`❗️ 仅剩 ${d} 天 (${until} 到期), 记得续费`);
+        else if (d <= warn) block.push(`⏰ 剩 ${d} 天 (${until} 到期), 记得续费`);
+    }
+    return block;
+}
+
 async function runTasks() {
     const accountsStr = $.getdata(XINYUE_DATA_KEY);
     if (!accountsStr) {
@@ -280,33 +474,36 @@ async function runTasks() {
     if (!accounts.length) return;
 
     $.log(`共发现 ${accounts.length} 个账号, 开始执行...`);
-    const summary = [];
+    const blocks = [];
     let allOk = true;
     for (let i = 0; i < accounts.length; i++) {
         $.index = i + 1;
-        const line = await claimReward(accounts[i]);
-        if (line.includes('❌')) allOk = false;
-        summary.push(line);
+        const block = await processAccount(accounts[i]);
+        if (block.some((l) => l.includes('❌'))) allOk = false;
+        blocks.push(block);
         if (i < accounts.length - 1) await $.wait(2000);
     }
 
     // 日志里先用中文逐条列出结果, 再发系统通知
-    const ok = summary.filter((l) => l.includes('✅')).length;
-    const rep = summary.filter((l) => l.includes('🔁')).length;
-    const warn = summary.filter((l) => l.includes('⚠️')).length;
-    const fail = summary.filter((l) => l.includes('❌')).length;
+    const ok = blocks.filter((b) => b.some((l) => l.includes('✅'))).length;
+    const rep = blocks.filter((b) => !b.some((l) => l.includes('✅')) && b.some((l) => l.includes('🔁'))).length;
+    const warnN = blocks.filter((b) => b.some((l) => l.includes('⚠️'))).length;
+    const fail = blocks.filter((b) => b.some((l) => l.includes('❌'))).length;
     $.log();
     $.log('──────────── 执行结果 ────────────');
-    summary.forEach((line, i) => $.log(`  ${i + 1}. ${line.replace(/^👤\s*/, '')}`));
-    $.log(`  共 ${summary.length} 个账号 · 成功 ${ok} · 重复 ${rep}`
-        + (warn ? ` · 待处理 ${warn}` : '') + (fail ? ` · 失败 ${fail}` : ''));
+    blocks.forEach((block, i) => {
+        $.log(`  ${i + 1}. ${block[0].replace(/^👤\s*/, '')}`);
+        block.slice(1).forEach((l) => $.log(`     ${l}`));
+    });
+    $.log(`  共 ${blocks.length} 个账号 · 成功 ${ok} · 重复 ${rep}`
+        + (warnN ? ` · 待处理 ${warnN}` : '') + (fail ? ` · 失败 ${fail}` : ''));
 
     const notifySuccess = $.getdata(KEY_NOTIFY_SUCCESS) !== 'false';
     const title = `心悦悦享卡 (${$.time('MM-dd')})`;
     if (allOk && !notifySuccess) {
         $.log('全部成功/重复, 按设置不发送通知。');
     } else {
-        $.msg($.name, title, summary.join('\n'));
+        $.msg($.name, title, blocks.map((b) => b.join('\n')).join('\n'));
     }
 }
 

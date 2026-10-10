@@ -19,7 +19,8 @@
       "keys": [
         "xinyue_datas",
         "xinyue_notify_success",
-        "xinyue_debug_log"
+        "xinyue_debug_log",
+        "xinyue_renew_warn_days"
       ],
       "descs_html": [
         "<h3 align=\"center\">心悦俱乐部悦享卡自动领取</h3>",
@@ -48,6 +49,13 @@
           "val": false,
           "type": "boolean",
           "desc": "开启后，将在脚本日志中打印完整的服务器原始响应数据。这对于排查未知错误非常有用，普通用户请保持关闭。"
+        },
+        {
+          "id": "xinyue_renew_warn_days",
+          "name": "临期续费提醒阈值(天)",
+          "val": 7,
+          "type": "number",
+          "desc": "悦享卡剩余天数不高于该值时，通知中追加续费提醒 (剩3天内升级为❗️，当天到期为‼️)。默认 7。"
         },
         {
           "id": "xinyue_datas",
